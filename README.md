@@ -1,12 +1,12 @@
 # Impala — Render Scraper Scheduler
 
-Dedicated GitHub Actions repository for triggering `POST /scrape-all` on a hosted Render scraper service every day at **9:00 AM Philippine Time (`Asia/Manila`, UTC+8)**, paired with two-layer anti-deactivation workflows for public GitHub repositories.
+Dedicated GitHub Actions repository for triggering `POST /scrape-all` on a hosted Render scraper service every day at **9:07 AM Philippine Time (`Asia/Manila`, UTC+8)**, paired with two-layer anti-deactivation workflows for public GitHub repositories.
 
 ## How It Works
 
 ### 1. Daily Scrape Workflow ([`.github/workflows/scrape-all.yml`](.github/workflows/scrape-all.yml))
 
-- **Schedule:** `0 1 * * *` (`01:00 UTC` = `09:00 PHT`, daily; Philippines does not observe DST).
+- **Schedule:** `7 1 * * *` (`01:07 UTC` = `09:07 PHT`, daily; off-minute to avoid top-of-hour `:00` scheduler contention; Philippines does not observe DST).
 - **Manual Runs:** Supports `workflow_dispatch` with an optional comma-separated `dates` input (`YYYY-MM-DD`).
 - **Execution ([`scripts/trigger_scrape.py`](scripts/trigger_scrape.py)):**
   1. Wakes the Render Free-tier container via `GET /health` (retrying `5xx` / connection timeouts while booting).
@@ -20,7 +20,7 @@ Dedicated GitHub Actions repository for triggering `POST /scrape-all` on a hoste
 GitHub automatically disables `on: schedule` workflows in **public** repositories after **60 days without repository commits**. This repo prevents hitting that cutoff automatically and includes an optional external fallback:
 
 1. **In-Repo Heartbeat Keep-Alive ([`.github/workflows/keep-alive.yml`](.github/workflows/keep-alive.yml)):**
-   - Runs weekly (`0 5 * * 1`, Mondays at 05:00 UTC / 01:00 PM PHT) and manually via `workflow_dispatch` (with an optional `force` toggle).
+   - Runs weekly (`17 5 * * 1`, Mondays at 05:17 UTC / 01:17 PM PHT; off-minute to avoid `:00` contention) and manually via `workflow_dispatch` (with an optional `force` toggle).
    - Checks the latest commit age (`git log -1 --format=%ct`). Whenever the repo has had no commits for `>= 45` days, it pushes a lightweight empty commit (`chore: keep-alive heartbeat [skip ci]`) via `GITHUB_TOKEN` (`permissions: contents: write`).
    - Because the 60-day inactivity limit is never reached (with two weekly chances between day 45 and day 60), scheduled runs continue uninterrupted with zero external infrastructure (~8 empty commits/year).
 2. **Optional External Cloudflare Worker Cron ([`cloudflare-worker/`](cloudflare-worker/)):**
@@ -28,7 +28,7 @@ GitHub automatically disables `on: schedule` workflows in **public** repositorie
    - Queries `GET /repos/{owner}/{repo}/actions/workflows` and calls `PUT /repos/{owner}/{repo}/actions/workflows/{id}/enable` for workflows in `disabled_inactivity` state (leaving `disabled_manually` workflows untouched).
 
 > [!NOTE]
-> - GitHub Actions `on: schedule` triggers at top-of-hour `:00` (`0 1 * * *`) are best-effort and can experience queue delays during peak UTC load.
+> - GitHub Actions `on: schedule` triggers are best-effort and can still experience minor queue delays during peak UTC load (both workflows use off-minute crons to avoid top-of-hour `:00` congestion).
 > - Ensure **Settings -> Actions -> General -> Workflow permissions** allows **Read and write permissions** so `keep-alive.yml` can push heartbeat commits.
 
 ---

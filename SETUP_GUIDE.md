@@ -64,10 +64,10 @@ Verify that authentication and communication with Render work before waiting for
 
 | Workflow | Trigger Schedule | Local Time | Purpose |
 | --- | --- | --- | --- |
-| `scrape-all.yml` | `0 1 * * *` | **09:00 AM PHT** (daily) | Wakes Render, triggers full scrape, and records completion in Turso DB. |
-| `keep-alive.yml` | `0 5 * * 1` | **01:00 PM PHT** (every Monday) | Checks latest commit age and pushes an empty `[skip ci]` heartbeat commit if `>= 45` days old. |
+| `scrape-all.yml` | `7 1 * * *` | **09:07 AM PHT** (daily) | Wakes Render, triggers full scrape, and records completion in Turso DB. |
+| `keep-alive.yml` | `17 5 * * 1` | **01:17 PM PHT** (every Monday) | Checks latest commit age and pushes an empty `[skip ci]` heartbeat commit if `>= 45` days old. |
 
-*Note: The Philippines (`Asia/Manila`, UTC+8) does not observe Daylight Saving Time (DST), so `01:00 UTC` is always `09:00 AM PHT` year-round.*
+*Note: The Philippines (`Asia/Manila`, UTC+8) does not observe Daylight Saving Time (DST), so `01:07 UTC` is always `09:07 AM PHT` year-round. Off-minute crons are used to avoid top-of-the-hour (`:00`) GitHub Actions scheduler congestion.*
 
 ---
 
@@ -152,5 +152,5 @@ curl "http://localhost:8787/cdn-cgi/local/scheduled"
 ### Job took ~1-2 minutes on the first step
 - Cause: Normal behavior for Render's Free tier. When inactive, the container spins down. `trigger_scrape.py` pings `GET /health` until the container boots and dependencies warm up.
 
-### Schedule queue delay (cron didn't run at exactly 09:00:00 AM)
-- Cause: GitHub Actions scheduled events (`on: schedule`) run on shared public infrastructure. During high-traffic top-of-the-hour marks, GitHub may delay scheduled workflow dispatch by several minutes.
+### Schedule queue delay (cron didn't run at exactly 09:07:00 AM)
+- Cause: GitHub Actions scheduled events (`on: schedule`) run on shared public infrastructure. Even with off-minute schedules, GitHub may delay scheduled workflow dispatch by several minutes during peak load.

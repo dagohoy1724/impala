@@ -2,8 +2,8 @@ name: Keep Scheduled Workflows Alive
 
 on:
   schedule:
-    # Weekly on Mondays at 05:00 UTC (01:00 PM PHT)
-    - cron: '0 5 * * 1'
+    # Weekly on Mondays at 05:17 UTC (01:17 PM PHT; off-minute to avoid :00 cron contention)
+    - cron: '17 5 * * 1'
   workflow_dispatch:
     inputs:
       force:
@@ -26,7 +26,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Refresh repository activity before 60-day limit
         env:
