@@ -1,0 +1,2 @@
+# Copy to .dev.vars for local testing with `npx wrangler dev --test-scheduled`
+GITHUB_TOKEN=github_pat_replace_me

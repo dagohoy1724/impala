@@ -1,0 +1,53 @@
+name: Keep Scheduled Workflows Alive
+
+on:
+  schedule:
+    # Weekly on Mondays at 05:00 UTC (01:00 PM PHT)
+    - cron: '0 5 * * 1'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Push a keep-alive heartbeat commit even if the latest commit is under 45 days old
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: keep-alive
+  cancel-in-progress: false
+
+jobs:
+  keep-alive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Refresh repository activity before 60-day limit
+        env:
+          MAX_INACTIVE_DAYS: '45'
+          FORCE_COMMIT: ${{ inputs.force || false }}
+        run: |
+          set -euo pipefail
+          max_days="${MAX_INACTIVE_DAYS}"
+          last_commit_epoch=$(git log -1 --format=%ct)
+          now_epoch=$(date -u +%s)
+          age_days=$(( (now_epoch - last_commit_epoch) / 86400 ))
+
+          echo "Last commit age: ${age_days} day(s) (threshold: ${max_days} days)."
+
+          if [ "${FORCE_COMMIT}" != "true" ] && [ "${age_days}" -lt "${max_days}" ]; then
+            echo "Repository is active; no keep-alive commit needed."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit --allow-empty -m "chore: keep-alive heartbeat [skip ci]"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+          echo "Pushed keep-alive heartbeat commit to ${GITHUB_REF_NAME}."

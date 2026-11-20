@@ -1,0 +1,35 @@
+name: Daily Scrape All
+
+on:
+  schedule:
+    # 09:00 AM Philippine Time (Asia/Manila, UTC+8) every day
+    - cron: '0 1 * * *'
+  workflow_dispatch:
+    inputs:
+      dates:
+        description: Optional comma-separated YYYY-MM-DD dates (empty scrapes all active dates)
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scrape-all
+  cancel-in-progress: false
+
+jobs:
+  scrape-all:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Trigger and verify Render scrape-all
+        env:
+          RENDER_API_URL: ${{ secrets.RENDER_API_URL }}
+          API_KEY: ${{ secrets.API_KEY }}
+          SCRAPE_DATES: ${{ inputs.dates || '' }}
+        run: python3 scripts/trigger_scrape.py

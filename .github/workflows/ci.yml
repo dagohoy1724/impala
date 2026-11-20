@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run Python trigger tests
+        run: python3 -m unittest discover -s tests -v
+
+      - name: Run Cloudflare Worker keep-alive tests
+        run: node --test cloudflare-worker/test/*.test.js

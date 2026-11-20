@@ -1,0 +1,15 @@
+name = "impala-gh-actions-keepalive"
+main = "src/index.js"
+compatibility_date = "2026-11-01"
+
+[triggers]
+# Runs every ~30 days (1st of each month at 05:00 UTC / 13:00 PHT)
+crons = ["0 5 1 * *"]
+
+[vars]
+# Set GITHUB_OWNER to the GitHub account/org where this repo is pushed
+GITHUB_OWNER = "REPLACE_WITH_GITHUB_OWNER"
+GITHUB_REPO = "impala"
+
+# Required secret (set via `npx wrangler secret put GITHUB_TOKEN` or Cloudflare Dashboard):
+# GITHUB_TOKEN -> GitHub fine-grained PAT with Actions: Read and write on this repository
