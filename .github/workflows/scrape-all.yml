@@ -2,6 +2,8 @@ name: Daily Render Scrape All
 
 on:
   schedule:
+    # Live schedule test: 06:20 PM Philippine Time (Asia/Manila, UTC+8 -> 10:20 UTC)
+    - cron: '20 10 * * *'
     # Primary: 09:07 AM Philippine Time (Asia/Manila, UTC+8)
     - cron: '7 1 * * *'
     # Backup 1: 09:23 AM PHT (runs only if primary cron was dropped or failed)
