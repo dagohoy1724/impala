@@ -13,7 +13,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Mapping
 
 DEFAULT_HEALTH_TIMEOUT_SECONDS = 180.0
@@ -24,6 +24,9 @@ DEFAULT_TRIGGER_RETRY_DELAY_SECONDS = 5.0
 DEFAULT_POLL_TIMEOUT_SECONDS = 300.0
 DEFAULT_POLL_INTERVAL_SECONDS = 5.0
 DEFAULT_MAX_POLL_TRANSIENT_ERRORS = 5
+DEFAULT_GITHUB_API_URL = "https://api.github.com"
+DEFAULT_WORKFLOW_FILE = "scrape-all.yml"
+MANILA_TZ = timezone(timedelta(hours=8))
 
 TRANSIENT_HTTP_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
 TERMINAL_SUCCESS_STATUS = "completed"
@@ -479,6 +482,126 @@ def run_scrape_workflow(
     )
 
 
+def _parse_github_timestamp(raw_timestamp: str) -> datetime | None:
+    cleaned = raw_timestamp.strip()
+    if not cleaned:
+        return None
+    if cleaned.endswith("Z"):
+        cleaned = f"{cleaned[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(cleaned)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def find_successful_scheduled_run_today(
+    env: Mapping[str, str],
+    *,
+    request_fn: HttpRequestFn = default_http_request,
+    now_fn: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+) -> dict[str, Any] | None:
+    """Return an earlier successful scheduled workflow run from today (Asia/Manila), if any.
+
+    Used when multiple staggered backup cron slots are configured in GitHub Actions so
+    later slots exit cleanly once the daily scrape has already succeeded. Fails open
+    (returns None) if GitHub API metadata cannot be fetched.
+    """
+    if env.get("GITHUB_EVENT_NAME", "").strip() != "schedule":
+        return None
+    if env.get("SCRAPE_DATES", "").strip():
+        return None
+
+    repository = env.get("GITHUB_REPOSITORY", "").strip()
+    if not repository or "/" not in repository:
+        return None
+
+    api_url = env.get("GITHUB_API_URL", DEFAULT_GITHUB_API_URL).strip().rstrip("/")
+    workflow_file = env.get("GITHUB_WORKFLOW_FILE", DEFAULT_WORKFLOW_FILE).strip() or DEFAULT_WORKFLOW_FILE
+    current_run_id = env.get("GITHUB_RUN_ID", "").strip()
+    github_token = env.get("GITHUB_TOKEN", "").strip()
+    timeout = _parse_float(env.get("REQUEST_TIMEOUT_SECONDS"), DEFAULT_REQUEST_TIMEOUT_SECONDS)
+
+    owner, repo = repository.split("/", 1)
+    runs_url = (
+        f"{api_url}/repos/{urllib.parse.quote(owner)}/{urllib.parse.quote(repo)}"
+        f"/actions/workflows/{urllib.parse.quote(workflow_file)}/runs"
+        "?event=schedule&status=completed&per_page=20"
+    )
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": USER_AGENT,
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    if github_token:
+        headers["Authorization"] = f"Bearer {github_token}"
+
+    try:
+        response = request_fn("GET", runs_url, headers, None, timeout)
+        if response.status != 200:
+            print(
+                f"Warning: GitHub runs check returned HTTP {response.status}; proceeding with scrape.",
+                file=sys.stderr,
+            )
+            return None
+        payload = _decode_json_object(response.body, "GET GitHub workflow runs")
+    except (ScrapeTriggerError, urllib.error.URLError, TimeoutError, OSError) as exc:
+        print(
+            f"Warning: Unable to check prior scheduled runs ({exc}); proceeding with scrape.",
+            file=sys.stderr,
+        )
+        return None
+
+    today_manila = now_fn().astimezone(MANILA_TZ).date()
+    workflow_runs = payload.get("workflow_runs")
+    if not isinstance(workflow_runs, list):
+        return None
+
+    for run in workflow_runs:
+        if not isinstance(run, dict):
+            continue
+        run_id = str(run.get("id", "")).strip()
+        if current_run_id and run_id == current_run_id:
+            continue
+        if str(run.get("event", "")).lower() != "schedule":
+            continue
+        if str(run.get("conclusion", "")).lower() != "success":
+            continue
+        created_at = _parse_github_timestamp(str(run.get("created_at", "")))
+        if created_at is None:
+            continue
+        if created_at.astimezone(MANILA_TZ).date() == today_manila:
+            return run
+
+    return None
+
+
+def report_skipped_schedule(
+    prior_run: Mapping[str, Any],
+    env: Mapping[str, str] | None = None,
+) -> None:
+    """Log and write a step summary when a backup cron slot skips an already-completed daily scrape."""
+    source = os.environ if env is None else env
+    prior_id = prior_run.get("id", "unknown")
+    prior_created = prior_run.get("created_at", "unknown")
+    print(
+        f"Daily scheduled scrape already succeeded today in Asia/Manila "
+        f"(workflow run {prior_id} at {prior_created}); skipping backup cron slot."
+    )
+    summary_path = source.get("GITHUB_STEP_SUMMARY", "").strip()
+    if summary_path:
+        lines = [
+            "## Daily `scrape-all` Run Summary (Backup Slot Skipped)",
+            "",
+            f"Skipped backup schedule slot because a scheduled scrape already succeeded today (`run_id={prior_id}`, created at `{prior_created}`).",
+            "",
+        ]
+        with open(summary_path, "a", encoding="utf-8") as handle:
+            handle.write("\n".join(lines))
+
+
 def format_summary_markdown(result: Mapping[str, Any]) -> str:
     """Format a completed scrape-all payload as a GitHub Actions Markdown summary."""
     failed_sites = result.get("failed_site_ids") or []
@@ -554,6 +677,7 @@ def main(
     request_fn: HttpRequestFn = default_http_request,
     sleep_fn: Callable[[float], None] = time.sleep,
     monotonic_fn: Callable[[], float] = time.monotonic,
+    now_fn: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
 ) -> int:
     """CLI entrypoint returning 0 on success and 1 on error."""
     args = build_arg_parser().parse_args(argv)
@@ -568,6 +692,15 @@ def main(
         merged_env["ALLOW_UNAUTHENTICATED"] = "true"
 
     try:
+        prior_run = find_successful_scheduled_run_today(
+            merged_env,
+            request_fn=request_fn,
+            now_fn=now_fn,
+        )
+        if prior_run is not None:
+            report_skipped_schedule(prior_run, merged_env)
+            return 0
+
         config = TriggerConfig.from_env(merged_env)
         result = run_scrape_workflow(
             config,

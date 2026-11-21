@@ -11,6 +11,7 @@ import threading
 import unittest
 import urllib.error
 from contextlib import redirect_stderr, redirect_stdout
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
@@ -18,6 +19,7 @@ from scripts.trigger_scrape import (
     HttpResponse,
     ScrapeTriggerError,
     TriggerConfig,
+    find_successful_scheduled_run_today,
     main,
     parse_dates,
     poll_scrape_all_status,
@@ -565,6 +567,201 @@ class StartAndPollTests(unittest.TestCase):
 
         self.assertEqual(result["run_id"], "existing-run")
         self.assertEqual(result["showtimes_count"], 900)
+
+
+class ScheduleDeduplicationTests(unittest.TestCase):
+    """Tests for multi-slot cron deduplication via GitHub Actions workflow runs API."""
+
+    def test_ignores_non_schedule_events(self) -> None:
+        calls: list[str] = []
+
+        def fake_request(
+            _method: str,
+            url: str,
+            _headers: dict[str, str],
+            _body: bytes | None,
+            _timeout: float,
+        ) -> HttpResponse:
+            calls.append(url)
+            return HttpResponse(status=200, body="{}")
+
+        env = {
+            "GITHUB_EVENT_NAME": "workflow_dispatch",
+            "GITHUB_REPOSITORY": "dagohoy1724/impala",
+        }
+        prior = find_successful_scheduled_run_today(env, request_fn=fake_request)
+        self.assertIsNone(prior)
+        self.assertEqual(calls, [])
+
+    def test_detects_earlier_successful_schedule_run_same_manila_day(self) -> None:
+        fixed_now = datetime(2026, 11, 21, 1, 23, 0, tzinfo=timezone.utc)
+        captured_headers: dict[str, str] = {}
+
+        def fake_request(
+            _method: str,
+            _url: str,
+            headers: dict[str, str],
+            _body: bytes | None,
+            _timeout: float,
+        ) -> HttpResponse:
+            captured_headers.update(headers)
+            return HttpResponse(
+                status=200,
+                body=json.dumps(
+                    {
+                        "workflow_runs": [
+                            {
+                                "id": 2002,
+                                "event": "schedule",
+                                "conclusion": "success",
+                                "created_at": "2026-11-21T01:07:15Z",
+                            },
+                            {
+                                "id": 1999,
+                                "event": "schedule",
+                                "conclusion": "success",
+                                "created_at": "2026-11-20T01:07:10Z",
+                            },
+                        ]
+                    }
+                ),
+            )
+
+        env = {
+            "GITHUB_EVENT_NAME": "schedule",
+            "GITHUB_REPOSITORY": "dagohoy1724/impala",
+            "GITHUB_RUN_ID": "2003",
+            "GITHUB_TOKEN": "ghs_test_token",
+        }
+        prior = find_successful_scheduled_run_today(
+            env,
+            request_fn=fake_request,
+            now_fn=lambda: fixed_now,
+        )
+        self.assertIsNotNone(prior)
+        assert prior is not None
+        self.assertEqual(prior["id"], 2002)
+        self.assertEqual(captured_headers.get("Authorization"), "Bearer ghs_test_token")
+
+    def test_does_not_skip_when_only_yesterday_or_failed_runs_exist(self) -> None:
+        fixed_now = datetime(2026, 11, 21, 1, 23, 0, tzinfo=timezone.utc)
+
+        def fake_request(
+            _method: str,
+            _url: str,
+            _headers: dict[str, str],
+            _body: bytes | None,
+            _timeout: float,
+        ) -> HttpResponse:
+            return HttpResponse(
+                status=200,
+                body=json.dumps(
+                    {
+                        "workflow_runs": [
+                            {
+                                "id": 2001,
+                                "event": "schedule",
+                                "conclusion": "failure",
+                                "created_at": "2026-11-21T01:07:15Z",
+                            },
+                            {
+                                "id": 1999,
+                                "event": "schedule",
+                                "conclusion": "success",
+                                "created_at": "2026-11-20T01:07:10Z",
+                            },
+                        ]
+                    }
+                ),
+            )
+
+        env = {
+            "GITHUB_EVENT_NAME": "schedule",
+            "GITHUB_REPOSITORY": "dagohoy1724/impala",
+            "GITHUB_RUN_ID": "2003",
+        }
+        prior = find_successful_scheduled_run_today(
+            env,
+            request_fn=fake_request,
+            now_fn=lambda: fixed_now,
+        )
+        self.assertIsNone(prior)
+
+    def test_fails_open_when_github_api_errors(self) -> None:
+        fixed_now = datetime(2026, 11, 21, 1, 23, 0, tzinfo=timezone.utc)
+
+        def fake_request(
+            _method: str,
+            _url: str,
+            _headers: dict[str, str],
+            _body: bytes | None,
+            _timeout: float,
+        ) -> HttpResponse:
+            return HttpResponse(status=503, body="GitHub API unavailable")
+
+        env = {
+            "GITHUB_EVENT_NAME": "schedule",
+            "GITHUB_REPOSITORY": "dagohoy1724/impala",
+        }
+        with redirect_stderr(io.StringIO()):
+            prior = find_successful_scheduled_run_today(
+                env,
+                request_fn=fake_request,
+                now_fn=lambda: fixed_now,
+            )
+        self.assertIsNone(prior)
+
+    def test_main_skips_render_call_when_backup_slot_detects_prior_success(self) -> None:
+        fixed_now = datetime(2026, 11, 21, 1, 23, 0, tzinfo=timezone.utc)
+        requested_urls: list[str] = []
+
+        def fake_request(
+            _method: str,
+            url: str,
+            _headers: dict[str, str],
+            _body: bytes | None,
+            _timeout: float,
+        ) -> HttpResponse:
+            requested_urls.append(url)
+            return HttpResponse(
+                status=200,
+                body=json.dumps(
+                    {
+                        "workflow_runs": [
+                            {
+                                "id": 98765,
+                                "event": "schedule",
+                                "conclusion": "success",
+                                "created_at": "2026-11-21T01:07:11Z",
+                            }
+                        ]
+                    }
+                ),
+            )
+
+        with tempfile.NamedTemporaryFile("r+", encoding="utf-8") as summary_file:
+            env = {
+                "GITHUB_EVENT_NAME": "schedule",
+                "GITHUB_REPOSITORY": "dagohoy1724/impala",
+                "GITHUB_RUN_ID": "98766",
+                "GITHUB_STEP_SUMMARY": summary_file.name,
+            }
+            stdout_buf = io.StringIO()
+            with redirect_stdout(stdout_buf):
+                exit_code = main(
+                    [],
+                    env=env,
+                    request_fn=fake_request,
+                    now_fn=lambda: fixed_now,
+                )
+            summary_file.seek(0)
+            summary_text = summary_file.read()
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(len(requested_urls), 1)
+        self.assertIn("/actions/workflows/scrape-all.yml/runs", requested_urls[0])
+        self.assertIn("skipping backup cron slot", stdout_buf.getvalue())
+        self.assertIn("Backup Slot Skipped", summary_text)
 
 
 class LocalHttpIntegrationTests(unittest.TestCase):

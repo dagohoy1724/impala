@@ -6,8 +6,9 @@ Dedicated GitHub Actions repository for triggering `POST /scrape-all` on a hoste
 
 ### 1. Daily Scrape Workflow ([`.github/workflows/scrape-all.yml`](.github/workflows/scrape-all.yml))
 
-- **Schedule:** `7 1 * * *` (`01:07 UTC` = `09:07 PHT`, daily; off-minute to avoid top-of-hour `:00` scheduler contention; Philippines does not observe DST).
-- **Manual Runs:** Supports `workflow_dispatch` with an optional comma-separated `dates` input (`YYYY-MM-DD`).
+- **Schedule:** Three staggered morning cron slots (`7 1 * * *`, `23 1 * * *`, `41 1 * * *` -> **09:07 AM**, **09:23 AM**, and **09:41 AM PHT** daily) to protect against GitHub Actions dropping a single `on: schedule` tick under load.
+- **Daily Idempotency Guard:** On `schedule` runs, `scripts/trigger_scrape.py` checks GitHub Actions workflow runs for the current `Asia/Manila` day first; once any scheduled slot succeeds, later backup slots exit `0` in <1 second without waking Render.
+- **Manual Runs:** Supports `workflow_dispatch` with an optional comma-separated `dates` input (`YYYY-MM-DD`), which always runs immediately regardless of prior scheduled runs.
 - **Execution ([`scripts/trigger_scrape.py`](scripts/trigger_scrape.py)):**
   1. Wakes the Render Free-tier container via `GET /health` (retrying `5xx` / connection timeouts while booting).
   2. Triggers `POST /scrape-all?background=true` (`202 Accepted` with `run_id`, authenticated via `Authorization: Bearer $API_KEY`).
