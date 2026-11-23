@@ -64,8 +64,8 @@ Verify that authentication and communication with Render work before waiting for
 
 | Workflow | Trigger Schedule | Local Time | Purpose |
 | --- | --- | --- | --- |
-| `scrape-all.yml` | `7 1 * * *`, `23 1 * * *`, `41 1 * * *` | **09:07 AM**, **09:23 AM**, **09:41 AM PHT** (daily) | Wakes Render, triggers full scrape, and records completion in Turso DB. Backup slots automatically skip in <1s once any scheduled slot succeeds that day. |
-| `keep-alive.yml` | `17 5 * * 1`, `29 5 * * 3` | **01:17 PM PHT** (Mon) / **01:29 PM PHT** (Wed) | Checks latest commit age and pushes an empty `[skip ci]` heartbeat commit if `>= 45` days old. |
+| `scrape-all.yml` | `7 18 * * *` | **02:07 AM PHT** (pre-shifted for **~09:00 AM PHT** execution after GitHub's ~7h cron queue lag) | Wakes Render, triggers full scrape, and records completion in Turso DB. |
+| `keep-alive.yml` | `17 5 * * 1` | **01:17 PM PHT** (every Monday) | Checks latest commit age and pushes an empty `[skip ci]` heartbeat commit if `>= 45` days old. |
 
 *Note: The Philippines (`Asia/Manila`, UTC+8) does not observe Daylight Saving Time (DST), so `01:07 UTC` is always `09:07 AM PHT` year-round. Off-minute crons are used to avoid top-of-the-hour (`:00`) GitHub Actions scheduler congestion.*
 

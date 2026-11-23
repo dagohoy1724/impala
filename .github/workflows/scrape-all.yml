@@ -2,12 +2,9 @@ name: Daily Render Scrape All
 
 on:
   schedule:
-    # Primary: 09:07 AM Philippine Time (Asia/Manila, UTC+8)
-    - cron: '7 1 * * *'
-    # Backup 1: 09:23 AM PHT (runs only if primary cron was dropped or failed)
-    - cron: '23 1 * * *'
-    # Backup 2: 09:41 AM PHT (runs only if earlier slots were dropped or failed)
-    - cron: '41 1 * * *'
+    # 18:07 UTC (02:07 AM PHT): scheduled ahead of GitHub's 00:00-02:00 UTC cron backlog
+    # (~7h queue lag) so the daily scrape completes by ~09:00 AM PHT
+    - cron: '7 18 * * *'
   workflow_dispatch:
     inputs:
       dates:

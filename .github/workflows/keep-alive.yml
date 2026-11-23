@@ -4,8 +4,6 @@ on:
   schedule:
     # Weekly on Mondays at 05:17 UTC (01:17 PM PHT; off-minute to avoid :00 cron contention)
     - cron: '17 5 * * 1'
-    # Backup weekly slot on Wednesdays at 05:29 UTC (01:29 PM PHT)
-    - cron: '29 5 * * 3'
   workflow_dispatch:
     inputs:
       force:
