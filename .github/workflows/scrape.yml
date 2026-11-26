@@ -1,0 +1,297 @@
+name: Scholarship Collection Pipeline
+
+on:
+  schedule:
+    # 18:07 UTC (02:07 AM PHT): pre-shifted ahead of GitHub's 00:00-02:00 UTC cron backlog
+    # (~7h queue lag) so the daily scrape completes by ~09:00 AM PHT
+    - cron: '7 18 * * *'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Execution mode (live network scrape, offline curated seed, or health check)"
+        required: false
+        type: choice
+        default: live
+        options:
+          - live
+          - seed-curated
+          - health
+      sources:
+        description: "Comma-separated source keys or slugs (e.g., ched,dost-sei,up). Empty runs all 8."
+        required: false
+        type: string
+        default: ""
+      force_browser:
+        description: "Force headless browser rendering for HTML pages (live mode only)"
+        required: false
+        type: boolean
+        default: false
+      no_skip_unchanged:
+        description: "Re-extract documents even when their SHA-256 content hash has not changed"
+        required: false
+        type: boolean
+        default: false
+      browser_engine:
+        description: "Browser backend (auto selects invisible-playwright on Ubuntu x86_64)"
+        required: false
+        type: choice
+        default: auto
+        options:
+          - auto
+          - invisible
+          - playwright
+      fail_on_error:
+        description: "Fail the workflow if any selected source fails, is blocked, or is unhealthy"
+        required: false
+        type: boolean
+        default: false
+      scraper_ref:
+        description: "Optional branch, tag, or full commit SHA of scholarship_scraper (defaults to vars.SCRAPER_REF or main)"
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scholarship-collection
+  cancel-in-progress: false
+
+jobs:
+  scrape:
+    name: Collect Philippine Scholarships
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout scholarship_scraper
+        id: checkout
+        env:
+          SCRAPER_REPO: ${{ vars.SCRAPER_REPO || 'kebbbnnn/scholarship_scraper' }}
+          SCRAPER_REF: ${{ inputs.scraper_ref || vars.SCRAPER_REF || 'main' }}
+          SCRAPER_REPO_TOKEN: ${{ secrets.SCRAPER_REPO_TOKEN }}
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          set -euo pipefail
+          trim() {
+            local v="$1"
+            v="${v#"${v%%[![:space:]]*}"}"
+            v="${v%"${v##*[![:space:]]}"}"
+            printf '%s' "$v"
+          }
+
+          repo="$(trim "${SCRAPER_REPO:-}")"
+          repo="${repo%.git}"
+          ref="$(trim "${SCRAPER_REF:-}")"
+          token="$(trim "${SCRAPER_REPO_TOKEN:-}")"
+
+          if [ -z "$repo" ]; then
+            repo="kebbbnnn/scholarship_scraper"
+          fi
+          if ! printf '%s' "$repo" | grep -Eq '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'; then
+            echo "::error::Invalid SCRAPER_REPO '${repo}'. Expected 'owner/repo' format."
+            exit 1
+          fi
+
+          if [ -z "$ref" ]; then
+            ref="main"
+          fi
+          case "$ref" in
+            -* | *[[:space:]]*)
+              echo "::error::Invalid SCRAPER_REF '${ref}'. Provide a branch, tag, or full commit SHA."
+              exit 1
+              ;;
+          esac
+
+          remote_url="https://github.com/${repo}.git"
+          git init --quiet .
+          if git remote get-url origin >/dev/null 2>&1; then
+            git remote set-url origin "$remote_url"
+          else
+            git remote add origin "$remote_url"
+          fi
+
+          if [ -n "$token" ]; then
+            basic_auth="$(printf 'x-access-token:%s' "$token" | base64 | tr -d '\n')"
+            echo "::add-mask::${basic_auth}"
+            git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${basic_auth}" \
+              fetch --depth=1 --no-tags origin "$ref"
+          else
+            git fetch --depth=1 --no-tags origin "$ref"
+          fi
+
+          git checkout --quiet --detach FETCH_HEAD
+          sha="$(git rev-parse HEAD)"
+          short_sha="$(git rev-parse --short HEAD)"
+          echo "Checked out ${repo}@${ref} (${short_sha})"
+          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+
+          if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+            {
+              echo "### Scraper Source"
+              echo "- Repository: \`${repo}\`"
+              echo "- Ref: \`${ref}\` (\`${short_sha}\`)"
+              echo ""
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Set up uv and Python
+        uses: astral-sh/setup-uv@v10.4.0
+        with:
+          enable-cache: true
+          python-version: "3.12"
+
+      - name: Validate database configuration
+        id: config
+        env:
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL || vars.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+        run: |
+          set -euo pipefail
+          trim() {
+            local v="$1"
+            v="${v#"${v%%[![:space:]]*}"}"
+            v="${v%"${v##*[![:space:]]}"}"
+            printf '%s' "$v"
+          }
+
+          url="$(trim "${TURSO_DATABASE_URL:-}")"
+          token="$(trim "${TURSO_AUTH_TOKEN:-}")"
+
+          if [ -n "$url" ] && printf '%s' "$url" | grep -Eqi '^(libsql|https?)://'; then
+            if printf '%s' "$url" | grep -Eqi '^(libsql|https)://' && [ -z "$token" ]; then
+              echo "::error::TURSO_DATABASE_URL targets a remote Turso database, but the TURSO_AUTH_TOKEN secret is not set."
+              exit 1
+            fi
+            echo "storage_mode=turso" >> "$GITHUB_OUTPUT"
+          elif [ -z "$url" ] && [ -n "$token" ]; then
+            echo "::error::TURSO_AUTH_TOKEN secret is set, but the TURSO_DATABASE_URL secret is not set."
+            exit 1
+          else
+            echo "storage_mode=local" >> "$GITHUB_OUTPUT"
+            if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+              {
+                echo "> [!NOTE]"
+                echo "> \`TURSO_DATABASE_URL\` and \`TURSO_AUTH_TOKEN\` secrets are not configured. Running against a local SQLite database (\`file:scholarships.db\`) and uploading results as downloadable workflow artifacts. Configure both repository secrets to persist runs directly to Turso Cloud."
+                echo ""
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
+
+      - name: Install Python dependencies
+        run: uv sync --frozen --no-dev
+
+      - name: Install Firefox and Xvfb OS dependencies
+        if: ${{ (inputs.mode || 'live') != 'seed-curated' }}
+        run: uv run playwright install-deps firefox
+
+      - name: Cache invisible-playwright Firefox engine
+        if: ${{ (inputs.mode || 'live') != 'seed-curated' && (inputs.browser_engine || 'auto') != 'playwright' }}
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/invisible-playwright
+          key: ${{ runner.os }}-invisible-playwright-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-invisible-playwright-
+
+      - name: Fetch invisible-playwright Firefox engine (Linux x86_64)
+        if: ${{ (inputs.mode || 'live') != 'seed-curated' && (inputs.browser_engine || 'auto') != 'playwright' }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: uv run invisible-playwright fetch
+
+      - name: Cache standard Playwright Firefox browser
+        if: ${{ (inputs.mode || 'live') != 'seed-curated' && (inputs.browser_engine || 'auto') == 'playwright' }}
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-ms-playwright-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-ms-playwright-
+
+      - name: Install standard Playwright Firefox browser
+        if: ${{ (inputs.mode || 'live') != 'seed-curated' && (inputs.browser_engine || 'auto') == 'playwright' }}
+        run: uv run playwright install firefox
+
+      - name: Initialize database schema and seed sources
+        id: init_db
+        env:
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL || vars.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+          SCRAPER_BROWSER_ENGINE: ${{ inputs.browser_engine || 'auto' }}
+        run: uv run scholarship-scraper init-db
+
+      - name: Run scholarship pipeline
+        id: run_pipeline
+        env:
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL || vars.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+          SCRAPER_BROWSER_ENGINE: ${{ inputs.browser_engine || 'auto' }}
+          SCRAPER_HEADLESS: "true"
+          SCRAPER_TIMEZONE: ${{ vars.SCRAPER_TIMEZONE || 'Asia/Manila' }}
+          SCRAPER_HTTP_TIMEOUT_SECONDS: ${{ vars.SCRAPER_HTTP_TIMEOUT_SECONDS }}
+          SCRAPER_RATE_LIMIT_DELAY_SECONDS: ${{ vars.SCRAPER_RATE_LIMIT_DELAY_SECONDS }}
+          SCRAPER_BROWSER_SEED: ${{ vars.SCRAPER_BROWSER_SEED }}
+          SCRAPER_PROXY_SERVER: ${{ secrets.SCRAPER_PROXY_SERVER || vars.SCRAPER_PROXY_SERVER }}
+          SCRAPER_PROXY_USERNAME: ${{ secrets.SCRAPER_PROXY_USERNAME }}
+          SCRAPER_PROXY_PASSWORD: ${{ secrets.SCRAPER_PROXY_PASSWORD }}
+          MALLOC_ARENA_MAX: "2"
+          RUN_MODE: ${{ inputs.mode || 'live' }}
+          RUN_SOURCES: ${{ inputs.sources || '' }}
+          RUN_FORCE_BROWSER: ${{ inputs.force_browser || false }}
+          RUN_NO_SKIP_UNCHANGED: ${{ inputs.no_skip_unchanged || false }}
+          RUN_FAIL_ON_ERROR: ${{ inputs.fail_on_error || false }}
+        run: |
+          set -euo pipefail
+          if [ "$RUN_MODE" = "health" ]; then
+            cmd=(uv run scholarship-scraper health --summary-file "$GITHUB_STEP_SUMMARY")
+            if [ -n "$RUN_SOURCES" ]; then
+              cmd+=(--sources "$RUN_SOURCES")
+            fi
+            if [ "$RUN_FAIL_ON_ERROR" = "true" ]; then
+              cmd+=(--fail-on-unhealthy)
+            fi
+          else
+            cmd=(uv run scholarship-scraper scrape --summary-file "$GITHUB_STEP_SUMMARY")
+            if [ "$RUN_MODE" = "seed-curated" ]; then
+              cmd+=(--seed-curated)
+            fi
+            if [ -n "$RUN_SOURCES" ]; then
+              cmd+=(--sources "$RUN_SOURCES")
+            fi
+            if [ "$RUN_FORCE_BROWSER" = "true" ] && [ "$RUN_MODE" = "live" ]; then
+              cmd+=(--force-browser)
+            fi
+            if [ "$RUN_NO_SKIP_UNCHANGED" = "true" ]; then
+              cmd+=(--no-skip-unchanged)
+            fi
+            if [ "$RUN_FAIL_ON_ERROR" = "true" ]; then
+              cmd+=(--fail-on-error)
+            fi
+          fi
+          "${cmd[@]}"
+
+      - name: Collect database statistics and export dataset
+        if: ${{ !cancelled() && steps.init_db.outcome == 'success' && (inputs.mode || 'live') != 'health' }}
+        env:
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL || vars.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+          STORAGE_MODE: ${{ steps.config.outputs.storage_mode }}
+        run: |
+          set -euo pipefail
+          uv run scholarship-scraper stats --summary-file "$GITHUB_STEP_SUMMARY"
+          uv run scholarship-scraper export --output exports/scholarships.json
+          if [ "$STORAGE_MODE" = "local" ] && [ -f scholarships.db ]; then
+            cp scholarships.db exports/scholarships.db
+          fi
+
+      - name: Upload scholarship export artifact
+        if: ${{ !cancelled() && steps.init_db.outcome == 'success' && (inputs.mode || 'live') != 'health' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: scholarships-export-${{ github.run_number }}-${{ github.run_attempt }}
+          path: exports/
+          retention-days: 14
+          overwrite: true
+          if-no-files-found: warn
