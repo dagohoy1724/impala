@@ -5,20 +5,20 @@ Dedicated public GitHub Actions scheduler repository that checks out and runs [`
 See [`kebbbnnn/scholarship_scraper`'s `docs/github-actions.md`](https://github.com/kebbbnnn/scholarship_scraper/blob/main/docs/github-actions.md) for upstream scraper behavior, connectors, and CLI options.
 
 > [!IMPORTANT]
-> **Avoid duplicate concurrent scrapes:** `kebbbnnn/scholarship_scraper` also contains its own `.github/workflows/scrape.yml` on a 12-hour schedule. If you configure `impala` to persist into the same Turso database, disable or remove the schedule in `scholarship_scraper` so the two repositories do not scrape concurrently into the same database (cross-repo runs do not share a `concurrency` group).
+> **Avoid duplicate concurrent scrapes:** `kebbbnnn/scholarship_scraper` keeps its own `.github/workflows/scrape.yml` schedule commented out by default. If you ever re-enable that schedule while `impala` persists into the same Turso database, disable one of the two schedules so they do not scrape concurrently into the same database (cross-repo runs do not share a `concurrency` group).
 
 ## How It Works
 
 ### 1. Daily Scholarship Collection Workflow ([`.github/workflows/scrape.yml`](.github/workflows/scrape.yml))
 
 - **Schedule:** `7 18 * * *` (`18:07 UTC` = `02:07 AM PHT` daily), pre-shifted ~7 hours before `09:00 AM PHT` to compensate for GitHub Actions' `00:00–02:00 UTC` cron queue lag so the daily collection completes by ~`09:00 AM PHT`.
-- **Concurrency & Timeout:** Uses `concurrency: group: scholarship-collection` with `cancel-in-progress: false` so overlapping scheduled/manual runs queue instead of interrupting an active database write. Timeout: `20 minutes`.
+- **Concurrency & Timeout:** Uses `concurrency: group: scholarship-collection` with `cancel-in-progress: false` so overlapping scheduled/manual runs queue instead of interrupting an active database write. Timeout: `45 minutes` (sized for dynamic multi-hop Ghost/Gemini scraping across built-in + custom sources).
 - **Execution Flow:**
   1. **Checks out `kebbbnnn/scholarship_scraper`** directly into the runner workspace (`SCRAPER_REPO` / `SCRAPER_REF`, defaulting to `kebbbnnn/scholarship_scraper@main`). Works unauthenticated for public repos, or authenticates with a one-shot masked `SCRAPER_REPO_TOKEN` (no persisted git credentials) if the scraper repo is private.
   2. **Sets up `uv` and Python 3.12** (`astral-sh/setup-uv@v10.4.0` with lockfile caching).
   3. **Validates Turso / SQLite storage configuration** before installing browsers or scraping (fails fast on half-configured Turso secrets).
   4. **Installs dependencies and caches browser binaries** (`invisible-playwright` Firefox on `ubuntu-latest` x86_64 by default, or standard Playwright Firefox when `browser_engine=playwright`; skipped entirely in `seed-curated` mode).
-  5. **Initializes the schema and runs `scholarship-scraper`** (`live`, `seed-curated`, or `health`), appending Markdown tables to `$GITHUB_STEP_SUMMARY`.
+  5. **Initializes the schema and runs `scholarship-scraper`** (`live` via `scrape` or `scrape-url`, `seed-curated`, or `health`), using dynamic Ghost (Gemini) multi-hop extraction with automatic deterministic fallback by default (configurable via `vars.SCRAPER_EXTRACTOR_MODE` or manual inputs) and appending Markdown tables to `$GITHUB_STEP_SUMMARY`.
   6. **Collects DB statistics and uploads artifacts** (`scholarships-export-<run_number>-<run_attempt>`, 14-day retention) containing `exports/scholarships.json` (plus `exports/scholarships.db` in zero-secret local SQLite mode).
 
 #### Storage Modes
@@ -35,7 +35,11 @@ See [`kebbbnnn/scholarship_scraper`'s `docs/github-actions.md`](https://github.c
 | Input | Type | Default | Options / Format | Behavior |
 | --- | --- | --- | --- | --- |
 | `mode` | choice | `live` | `live`, `seed-curated`, `health` | `live` scrapes live URLs; `seed-curated` runs offline fixture snapshots (skips browser install); `health` checks URL reachability & layout landmarks. |
-| `sources` | string | `""` (all 8) | Comma-separated slugs or adapter keys | Limits execution to specific connectors (`ched`, `dost-sei`, `unifast`, `tesda`, `up`, `ateneo`, `dlsu`, `sm-foundation`). |
+| `extractor` | choice | `dynamic` | `dynamic`, `deterministic` | `dynamic` runs Ghost (Gemini) multi-hop extraction with automatic deterministic fallback; `deterministic` disables LLM calls and uses HTML/PDF heuristics only. Scheduled runs defer to `vars.SCRAPER_EXTRACTOR_MODE` (default `dynamic`). |
+| `target_url` | string | `""` | Any public `http(s)://` URL | Optional single scholarship website URL to run via `scrape-url` in `live` mode (overrides `sources`). |
+| `sources` | string | `""` (all) | Comma-separated slugs or adapter keys | Limits execution to specific built-in (`ched`, `dost-sei`, `unifast`, `tesda`, `up`, `ateneo`, `dlsu`, `sm-foundation`) or saved `custom_sources.json` connectors. |
+| `max_pages` | string | `""` | Integer `>= 1` | Optional override for maximum pages fetched per source in dynamic mode. Leave blank to respect per-source `custom_sources.json` caps, `vars.SCRAPER_MAX_PAGES_PER_SOURCE`, or the default (`8`). |
+| `max_depth` | string | `""` | Integer `>= 0` | Optional override for maximum hop depth per source in dynamic mode. Leave blank to respect per-source `custom_sources.json` caps, `vars.SCRAPER_MAX_CRAWL_DEPTH`, or the default (`2`). |
 | `force_browser` | boolean | `false` | `true` / `false` | Forces headless browser rendering for HTML pages (`live` mode only). |
 | `no_skip_unchanged` | boolean | `false` | `true` / `false` | Re-extracts documents even if their SHA-256 `content_hash` already exists in `source_documents`. |
 | `browser_engine` | choice | `auto` | `auto`, `invisible`, `playwright` | `auto` selects `invisible-playwright` on `ubuntu-latest` (`x86_64`). Switch to `playwright` as a fallback. |
@@ -45,14 +49,17 @@ See [`kebbbnnn/scholarship_scraper`'s `docs/github-actions.md`](https://github.c
 Common `gh` CLI triggers:
 
 ```bash
-# Run all 8 live sources
+# Run all built-in + saved custom sources live (dynamic Ghost Gemini extractor)
 gh workflow run scrape.yml
 
 # Zero-secret smoke test using offline curated snapshots (~20s, skips browser downloads)
 gh workflow run scrape.yml -f mode=seed-curated -f fail_on_error=true
 
-# Scrape specific sources with forced headless browser rendering
-gh workflow run scrape.yml -f mode=live -f sources=ched,dost-sei -f force_browser=true
+# Scrape an arbitrary scholarship website URL directly via scrape-url
+gh workflow run scrape.yml -f mode=live -f target_url=https://www.sm-foundation.org/what_we_do/college-scholarship-program/ -f max_pages=4 -f max_depth=1
+
+# Scrape specific sources using deterministic extraction only (no LLM calls)
+gh workflow run scrape.yml -f mode=live -f extractor=deterministic -f sources=ched,dost-sei -f force_browser=true
 
 # Run source health & landmark checks
 gh workflow run scrape.yml -f mode=health -f fail_on_error=true
@@ -96,6 +103,7 @@ Configure these under **Settings -> Secrets and variables -> Actions**.
 | `SCRAPER_PROXY_SERVER` | No | Yes (`vars.SCRAPER_PROXY_SERVER`) | Optional proxy endpoint (`socks5://host:port` or `http://host:port`) forwarded to the browser engine. |
 | `SCRAPER_PROXY_USERNAME` | No | No (Secret only) | Optional proxy authentication username. |
 | `SCRAPER_PROXY_PASSWORD` | No | No (Secret only) | Optional proxy authentication password. |
+| `GHOST_BASE_URL` | No | Yes (`vars.GHOST_BASE_URL`) | Optional external `ghost-server` HTTP proxy URL (leave unset to run embedded in-process `Ghost(model="gemini")`). |
 
 #### Variables (`vars.*`)
 
@@ -103,10 +111,17 @@ Configure these under **Settings -> Secrets and variables -> Actions**.
 | --- | --- | --- |
 | `SCRAPER_REPO` | `kebbbnnn/scholarship_scraper` | Target GitHub repository (`owner/repo`) to check out and run. |
 | `SCRAPER_REF` | `main` | Default branch, tag, or full 40-char commit SHA of `scholarship_scraper` to check out. |
+| `SCRAPER_EXTRACTOR_MODE` | `dynamic` | Default extraction engine for scheduled runs (`dynamic` or `deterministic`). |
 | `SCRAPER_TIMEZONE` | `Asia/Manila` | IANA timezone passed to `invisible-playwright` and deadline evaluation. |
 | `SCRAPER_HTTP_TIMEOUT_SECONDS` | `25` | Timeout in seconds for HTTP requests and browser navigation. |
 | `SCRAPER_RATE_LIMIT_DELAY_SECONDS` | `1.0` | Delay in seconds between requests. |
 | `SCRAPER_BROWSER_SEED` | *(random per run)* | Optional integer seed for deterministic `invisible-playwright` fingerprints. |
+| `SCRAPER_LLM_MODEL` | `gemini` | Ghost model identifier used during dynamic LLM extraction. |
+| `SCRAPER_LLM_DELAY_SECONDS` | `2.0` | Minimum pacing delay in seconds between Ghost LLM calls. |
+| `SCRAPER_LLM_TIMEOUT_SECONDS` | `90` | HTTP timeout in seconds when `GHOST_BASE_URL` is configured. |
+| `SCRAPER_LLM_MAX_CHARS` | `24000` | Maximum condensed page text length sent per Gemini extraction prompt. |
+| `SCRAPER_MAX_PAGES_PER_SOURCE` | `8` | Default maximum pages fetched per source in dynamic multi-hop mode. |
+| `SCRAPER_MAX_CRAWL_DEPTH` | `2` | Default maximum hop depth per source in dynamic multi-hop mode. |
 
 ### 2. Deploy the Cloudflare Worker (Optional External Keep-Alive)
 

@@ -16,8 +16,31 @@ on:
           - live
           - seed-curated
           - health
+      extractor:
+        description: "Extraction engine for live scrapes (dynamic uses Ghost Gemini + fallback)"
+        required: false
+        type: choice
+        default: dynamic
+        options:
+          - dynamic
+          - deterministic
+      target_url:
+        description: "Optional arbitrary scholarship provider URL to scrape via scrape-url (live mode only; overrides sources)"
+        required: false
+        type: string
+        default: ""
       sources:
-        description: "Comma-separated source keys or slugs (e.g., ched,dost-sei,up). Empty runs all 8."
+        description: "Comma-separated source keys or slugs (e.g., ched,dost-sei,up). Empty runs all built-in + custom sources."
+        required: false
+        type: string
+        default: ""
+      max_pages:
+        description: "Optional max pages per source in dynamic mode (empty uses custom_sources.json, vars.SCRAPER_MAX_PAGES_PER_SOURCE, or 8)"
+        required: false
+        type: string
+        default: ""
+      max_depth:
+        description: "Optional max link hop depth per source in dynamic mode (empty uses custom_sources.json, vars.SCRAPER_MAX_CRAWL_DEPTH, or 2)"
         required: false
         type: string
         default: ""
@@ -62,7 +85,8 @@ jobs:
   scrape:
     name: Collect Philippine Scholarships
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Accommodates dynamic multi-hop Ghost (Gemini) crawling across built-in + custom sources
+    timeout-minutes: 45
 
     steps:
       - name: Checkout scholarship_scraper
@@ -220,6 +244,8 @@ jobs:
           TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL || vars.TURSO_DATABASE_URL }}
           TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
           SCRAPER_BROWSER_ENGINE: ${{ inputs.browser_engine || 'auto' }}
+          SCRAPER_EXTRACTOR_MODE: ${{ inputs.extractor || vars.SCRAPER_EXTRACTOR_MODE }}
+          SCRAPER_LLM_MODEL: ${{ vars.SCRAPER_LLM_MODEL || 'gemini' }}
         run: uv run scholarship-scraper init-db
 
       - name: Run scholarship pipeline
@@ -236,31 +262,88 @@ jobs:
           SCRAPER_PROXY_SERVER: ${{ secrets.SCRAPER_PROXY_SERVER || vars.SCRAPER_PROXY_SERVER }}
           SCRAPER_PROXY_USERNAME: ${{ secrets.SCRAPER_PROXY_USERNAME }}
           SCRAPER_PROXY_PASSWORD: ${{ secrets.SCRAPER_PROXY_PASSWORD }}
+          SCRAPER_EXTRACTOR_MODE: ${{ vars.SCRAPER_EXTRACTOR_MODE }}
+          GHOST_BASE_URL: ${{ secrets.GHOST_BASE_URL || vars.GHOST_BASE_URL }}
+          SCRAPER_LLM_MODEL: ${{ vars.SCRAPER_LLM_MODEL || 'gemini' }}
+          SCRAPER_LLM_DELAY_SECONDS: ${{ vars.SCRAPER_LLM_DELAY_SECONDS }}
+          SCRAPER_LLM_TIMEOUT_SECONDS: ${{ vars.SCRAPER_LLM_TIMEOUT_SECONDS }}
+          SCRAPER_LLM_MAX_CHARS: ${{ vars.SCRAPER_LLM_MAX_CHARS }}
+          SCRAPER_MAX_PAGES_PER_SOURCE: ${{ vars.SCRAPER_MAX_PAGES_PER_SOURCE }}
+          SCRAPER_MAX_CRAWL_DEPTH: ${{ vars.SCRAPER_MAX_CRAWL_DEPTH }}
           MALLOC_ARENA_MAX: "2"
           RUN_MODE: ${{ inputs.mode || 'live' }}
+          RUN_EXTRACTOR: ${{ inputs.extractor || '' }}
+          RUN_TARGET_URL: ${{ inputs.target_url || '' }}
           RUN_SOURCES: ${{ inputs.sources || '' }}
+          RUN_MAX_PAGES: ${{ inputs.max_pages || '' }}
+          RUN_MAX_DEPTH: ${{ inputs.max_depth || '' }}
           RUN_FORCE_BROWSER: ${{ inputs.force_browser || false }}
           RUN_NO_SKIP_UNCHANGED: ${{ inputs.no_skip_unchanged || false }}
           RUN_FAIL_ON_ERROR: ${{ inputs.fail_on_error || false }}
         run: |
           set -euo pipefail
-          if [ "$RUN_MODE" = "health" ]; then
+          trim() {
+            local v="$1"
+            v="${v#"${v%%[![:space:]]*}"}"
+            v="${v%"${v##*[![:space:]]}"}"
+            printf '%s' "$v"
+          }
+
+          mode="$(trim "${RUN_MODE:-live}")"
+          extractor="$(trim "${RUN_EXTRACTOR:-}")"
+          target_url="$(trim "${RUN_TARGET_URL:-}")"
+          sources="$(trim "${RUN_SOURCES:-}")"
+          max_pages="$(trim "${RUN_MAX_PAGES:-}")"
+          max_depth="$(trim "${RUN_MAX_DEPTH:-}")"
+
+          if [ "$mode" = "health" ]; then
             cmd=(uv run scholarship-scraper health --summary-file "$GITHUB_STEP_SUMMARY")
-            if [ -n "$RUN_SOURCES" ]; then
-              cmd+=(--sources "$RUN_SOURCES")
+            if [ -n "$sources" ]; then
+              cmd+=(--sources "$sources")
             fi
             if [ "$RUN_FAIL_ON_ERROR" = "true" ]; then
               cmd+=(--fail-on-unhealthy)
             fi
+          elif [ "$mode" = "live" ] && [ -n "$target_url" ]; then
+            cmd=(uv run scholarship-scraper scrape-url --summary-file "$GITHUB_STEP_SUMMARY")
+            if [ -n "$extractor" ]; then
+              cmd+=(--extractor "$extractor")
+            fi
+            if [ -n "$max_pages" ]; then
+              cmd+=(--max-pages "$max_pages")
+            fi
+            if [ -n "$max_depth" ]; then
+              cmd+=(--max-depth "$max_depth")
+            fi
+            if [ "$RUN_FORCE_BROWSER" = "true" ]; then
+              cmd+=(--force-browser)
+            fi
+            if [ "$RUN_NO_SKIP_UNCHANGED" = "true" ]; then
+              cmd+=(--no-skip-unchanged)
+            fi
+            if [ "$RUN_FAIL_ON_ERROR" = "true" ]; then
+              cmd+=(--fail-on-error)
+            fi
+            cmd+=(-- "$target_url")
           else
             cmd=(uv run scholarship-scraper scrape --summary-file "$GITHUB_STEP_SUMMARY")
-            if [ "$RUN_MODE" = "seed-curated" ]; then
+            if [ "$mode" = "seed-curated" ]; then
               cmd+=(--seed-curated)
+            else
+              if [ -n "$extractor" ]; then
+                cmd+=(--extractor "$extractor")
+              fi
+              if [ -n "$max_pages" ]; then
+                cmd+=(--max-pages "$max_pages")
+              fi
+              if [ -n "$max_depth" ]; then
+                cmd+=(--max-depth "$max_depth")
+              fi
             fi
-            if [ -n "$RUN_SOURCES" ]; then
-              cmd+=(--sources "$RUN_SOURCES")
+            if [ -n "$sources" ]; then
+              cmd+=(--sources "$sources")
             fi
-            if [ "$RUN_FORCE_BROWSER" = "true" ] && [ "$RUN_MODE" = "live" ]; then
+            if [ "$RUN_FORCE_BROWSER" = "true" ] && [ "$mode" = "live" ]; then
               cmd+=(--force-browser)
             fi
             if [ "$RUN_NO_SKIP_UNCHANGED" = "true" ]; then

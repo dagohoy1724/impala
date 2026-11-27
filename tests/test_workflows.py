@@ -6,6 +6,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import stat
 import subprocess
 import tempfile
@@ -166,7 +167,11 @@ class WorkflowStructureTests(unittest.TestCase):
     def test_scrape_workflow_exposes_all_documented_dispatch_inputs(self) -> None:
         expected_inputs = (
             "mode:",
+            "extractor:",
+            "target_url:",
             "sources:",
+            "max_pages:",
+            "max_depth:",
             "force_browser:",
             "no_skip_unchanged:",
             "browser_engine:",
@@ -174,6 +179,45 @@ class WorkflowStructureTests(unittest.TestCase):
             "scraper_ref:",
         )
         self.assertTrue(all(token in self.scrape_text for token in expected_inputs))
+
+    def test_scrape_workflow_wires_dynamic_llm_and_crawl_env_vars(self) -> None:
+        expected_env_vars = (
+            "SCRAPER_EXTRACTOR_MODE:",
+            "GHOST_BASE_URL:",
+            "SCRAPER_LLM_MODEL:",
+            "SCRAPER_LLM_DELAY_SECONDS:",
+            "SCRAPER_LLM_TIMEOUT_SECONDS:",
+            "SCRAPER_LLM_MAX_CHARS:",
+            "SCRAPER_MAX_PAGES_PER_SOURCE:",
+            "SCRAPER_MAX_CRAWL_DEPTH:",
+        )
+        self.assertTrue(all(token in self.scrape_text for token in expected_env_vars))
+
+    def test_scrape_workflow_uses_extended_timeout_for_dynamic_scraping(self) -> None:
+        self.assertIn("timeout-minutes: 45", self.scrape_text)
+
+    def test_workflows_do_not_interpolate_untrusted_inputs_into_run_scripts(self) -> None:
+        unsafe_pattern = re.compile(r"^\s*[^#\n]*\$\{\{\s*inputs\.")
+        violations: list[str] = []
+        for workflow_path in sorted(WORKFLOWS_DIR.glob("*.yml")):
+            in_run_block = False
+            run_indent = 0
+            for line in workflow_path.read_text(encoding="utf-8").splitlines():
+                stripped = line.lstrip()
+                indent = len(line) - len(stripped)
+                if in_run_block:
+                    if stripped and indent <= run_indent:
+                        in_run_block = False
+                    elif unsafe_pattern.search(line):
+                        violations.append(f"{workflow_path.name}: {line.strip()}")
+                if stripped.startswith("run:"):
+                    run_body = stripped.removeprefix("run:").strip()
+                    if run_body in {"|", ">", "|-", ">-"}:
+                        in_run_block = True
+                        run_indent = indent
+                    elif unsafe_pattern.search(run_body):
+                        violations.append(f"{workflow_path.name}: {line.strip()}")
+        self.assertEqual(violations, [])
 
     def test_scrape_workflow_defaults_to_kebbbnnn_scholarship_scraper(self) -> None:
         self.assertIn("vars.SCRAPER_REPO || 'kebbbnnn/scholarship_scraper'", self.scrape_text)
@@ -390,7 +434,11 @@ class PipelineCommandStepTests(unittest.TestCase):
                 "PATH": f"{bin_dir}:{os.environ.get('PATH', '/usr/bin:/bin')}",
                 "GITHUB_STEP_SUMMARY": str(summary_file),
                 "RUN_MODE": "live",
+                "RUN_EXTRACTOR": "",
+                "RUN_TARGET_URL": "",
                 "RUN_SOURCES": "",
+                "RUN_MAX_PAGES": "",
+                "RUN_MAX_DEPTH": "",
                 "RUN_FORCE_BROWSER": "false",
                 "RUN_NO_SKIP_UNCHANGED": "false",
                 "RUN_FAIL_ON_ERROR": "false",
@@ -404,11 +452,21 @@ class PipelineCommandStepTests(unittest.TestCase):
             ] if log_file.exists() else []
             return result, calls
 
+    def test_scheduled_live_run_omits_cli_overrides_for_repo_vars_and_custom_sources(self) -> None:
+        result, calls = self._run_pipeline({})
+        self.assertEqual(
+            (result.returncode, calls[0][:4], len(calls[0])),
+            (0, ["run", "scholarship-scraper", "scrape", "--summary-file"], 5),
+        )
+
     def test_live_mode_passes_all_enabled_flags(self) -> None:
         result, calls = self._run_pipeline(
             {
                 "RUN_MODE": "live",
+                "RUN_EXTRACTOR": "deterministic",
                 "RUN_SOURCES": "ched,dost-sei",
+                "RUN_MAX_PAGES": "4",
+                "RUN_MAX_DEPTH": "1",
                 "RUN_FORCE_BROWSER": "true",
                 "RUN_NO_SKIP_UNCHANGED": "true",
                 "RUN_FAIL_ON_ERROR": "true",
@@ -420,6 +478,12 @@ class PipelineCommandStepTests(unittest.TestCase):
                 0,
                 ["run", "scholarship-scraper", "scrape"],
                 [
+                    "--extractor",
+                    "deterministic",
+                    "--max-pages",
+                    "4",
+                    "--max-depth",
+                    "1",
                     "--sources",
                     "ched,dost-sei",
                     "--force-browser",
@@ -429,18 +493,73 @@ class PipelineCommandStepTests(unittest.TestCase):
             ),
         )
 
-    def test_seed_curated_mode_omits_force_browser_flag(self) -> None:
+    def test_live_mode_with_target_url_invokes_scrape_url_subcommand(self) -> None:
+        result, calls = self._run_pipeline(
+            {
+                "RUN_MODE": "live",
+                "RUN_EXTRACTOR": "dynamic",
+                "RUN_TARGET_URL": "  https://example.org/scholarships  ",
+                "RUN_SOURCES": "ched",
+                "RUN_MAX_PAGES": "5",
+                "RUN_MAX_DEPTH": "1",
+                "RUN_FORCE_BROWSER": "true",
+                "RUN_NO_SKIP_UNCHANGED": "true",
+                "RUN_FAIL_ON_ERROR": "true",
+            }
+        )
+        self.assertEqual(
+            (result.returncode, calls[0][:3], calls[0][5:]),
+            (
+                0,
+                ["run", "scholarship-scraper", "scrape-url"],
+                [
+                    "--extractor",
+                    "dynamic",
+                    "--max-pages",
+                    "5",
+                    "--max-depth",
+                    "1",
+                    "--force-browser",
+                    "--no-skip-unchanged",
+                    "--fail-on-error",
+                    "--",
+                    "https://example.org/scholarships",
+                ],
+            ),
+        )
+
+    def test_whitespace_only_target_url_falls_back_to_regular_scrape(self) -> None:
+        result, calls = self._run_pipeline(
+            {
+                "RUN_MODE": "live",
+                "RUN_TARGET_URL": "   ",
+                "RUN_SOURCES": "up",
+            }
+        )
+        self.assertEqual(
+            (result.returncode, calls[0][:3], calls[0][5:]),
+            (0, ["run", "scholarship-scraper", "scrape"], ["--sources", "up"]),
+        )
+
+    def test_seed_curated_mode_omits_live_only_flags_and_ignores_target_url(self) -> None:
         result, calls = self._run_pipeline(
             {
                 "RUN_MODE": "seed-curated",
+                "RUN_EXTRACTOR": "dynamic",
+                "RUN_TARGET_URL": "https://example.org/scholarships",
+                "RUN_MAX_PAGES": "5",
+                "RUN_MAX_DEPTH": "1",
                 "RUN_FORCE_BROWSER": "true",
                 "RUN_FAIL_ON_ERROR": "true",
             }
         )
-        self.assertTrue(
-            result.returncode == 0
-            and "--seed-curated" in calls[0]
-            and "--force-browser" not in calls[0]
+        self.assertEqual(
+            (result.returncode, calls[0][:3], calls[0][5:]),
+            (
+                0,
+                ["run", "scholarship-scraper", "scrape"],
+                ["--seed-curated", "--fail-on-error"],
+            ),
         )
 
     def test_health_mode_invokes_health_subcommand_with_fail_on_unhealthy(self) -> None:

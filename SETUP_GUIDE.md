@@ -40,9 +40,9 @@ If `kebbbnnn/scholarship_scraper` stays **public**, no checkout token is needed.
 - **Pinning a specific version (optional):**
   - Set repository variable **`SCRAPER_REF`** (under **Variables**) to a tag or full 40-character commit SHA instead of tracking `main`.
   - Override the upstream repo with repository variable **`SCRAPER_REPO`** (`owner/repo`) if you fork or rename it.
-- **Optional proxy / tuning:**
-  - Secrets: `SCRAPER_PROXY_SERVER` *(also accepted as Variable)*, `SCRAPER_PROXY_USERNAME`, `SCRAPER_PROXY_PASSWORD`
-  - Variables: `SCRAPER_TIMEZONE` (default `Asia/Manila`), `SCRAPER_HTTP_TIMEOUT_SECONDS` (default `25`), `SCRAPER_RATE_LIMIT_DELAY_SECONDS` (default `1.0`), `SCRAPER_BROWSER_SEED`
+- **Optional proxy, dynamic LLM & crawl tuning:**
+  - Secrets: `SCRAPER_PROXY_SERVER` *(also accepted as Variable)*, `SCRAPER_PROXY_USERNAME`, `SCRAPER_PROXY_PASSWORD`, `GHOST_BASE_URL` *(also accepted as Variable; optional external `ghost-server` URL if GitHub runner IPs hit Gemini rate limits)*
+  - Variables: `SCRAPER_EXTRACTOR_MODE` (default `dynamic`; set `deterministic` to disable LLM calls on scheduled runs), `SCRAPER_LLM_MODEL` (default `gemini`), `SCRAPER_LLM_DELAY_SECONDS` (default `2.0`), `SCRAPER_LLM_TIMEOUT_SECONDS` (default `90`), `SCRAPER_LLM_MAX_CHARS` (default `24000`), `SCRAPER_MAX_PAGES_PER_SOURCE` (default `8`), `SCRAPER_MAX_CRAWL_DEPTH` (default `2`), `SCRAPER_TIMEZONE` (default `Asia/Manila`), `SCRAPER_HTTP_TIMEOUT_SECONDS` (default `25`), `SCRAPER_RATE_LIMIT_DELAY_SECONDS` (default `1.0`), `SCRAPER_BROWSER_SEED`
 
 ### Step 1.3: Enable Workflow Write Permissions (Required for Keep-Alive)
 
@@ -54,9 +54,9 @@ The in-repo keep-alive workflow (`keep-alive.yml`) checks weekly whether the lat
 4. Select **Read and write permissions**.
 5. Click **Save**.
 
-### Step 1.4: Disable Duplicate Schedules on `kebbbnnn/scholarship_scraper`
+### Step 1.4: Keep Duplicate Schedules Disabled on `kebbbnnn/scholarship_scraper`
 
-`kebbbnnn/scholarship_scraper` includes its own scheduled `.github/workflows/scrape.yml` (`0 */12 * * *`). If `impala` is now your scheduled runner writing to Turso Cloud, disable the workflow in `kebbbnnn/scholarship_scraper` (**Actions -> Scholarship Collection Pipeline -> `...` -> Disable workflow**) so the two repositories do not run concurrent scrapes against the same database.
+`kebbbnnn/scholarship_scraper` keeps the cron trigger in its own `.github/workflows/scrape.yml` disabled by default. Leave it disabled while `impala` is your scheduled runner writing to Turso Cloud so the two repositories never run concurrent scrapes against the same database.
 
 ---
 
@@ -84,11 +84,14 @@ Verify checkout, `uv` installation, pipeline execution, Job Summary rendering, a
 2. Or run via GitHub CLI (`gh`):
 
 ```bash
-# Live run across all 8 Tier-1 Philippine sources
+# Live run across all built-in + saved custom sources (dynamic Ghost Gemini extractor)
 gh workflow run scrape.yml
 
-# Targeted live run with forced headless browser rendering
-gh workflow run scrape.yml -f mode=live -f sources=ched,dost-sei -f force_browser=true
+# Ad-hoc single-site dynamic scrape via scrape-url
+gh workflow run scrape.yml -f mode=live -f target_url=https://www.sm-foundation.org/what_we_do/college-scholarship-program/ -f max_pages=4 -f max_depth=1
+
+# Targeted live run using deterministic extraction only with forced headless browser rendering
+gh workflow run scrape.yml -f mode=live -f extractor=deterministic -f sources=ched,dost-sei -f force_browser=true
 
 # Watch an active run and download its exported dataset artifact
 gh run watch
@@ -210,7 +213,11 @@ curl "http://localhost:8787/cdn-cgi/local/scheduled"
 
 ### `Checkout scholarship_scraper` fails with `Repository not found` or authentication error
 - Cause: `kebbbnnn/scholarship_scraper` was made private (or `SCRAPER_REPO` / `SCRAPER_REF` is misspelled).
-- Solution: Verify `SCRAPER_REPO` and `SCRAPER_REF`, and add a fine-grained PAT with **Contents: Read-only** access as the `SCRAPER_REPO_TOKEN` secret.
+- Solution: Verify `SCRAPER_REPO` and `SCRAPER_REF`, and add a fine-grained PAT with **Contents: Read-only** access as the `SCRAPER_REPO_TOKEN` secret. Note that `uv sync` also fetches `kebbbnnn/ghost` over HTTPS, so `kebbbnnn/ghost` must remain public unless git credentials are configured for `uv sync`.
+
+### Dynamic LLM extraction falls back to deterministic mode (`Ghost rate limited` / `fallback`)
+- Cause: Anonymous `gemini.google.com` requests from GitHub Actions datacenter IPs hit rate limits or a CAPTCHA; the crawler's circuit breaker intentionally preserves prior hops and falls back to deterministic extraction.
+- Solution: Configure `GHOST_BASE_URL` (secret or variable) pointing to an external `ghost-server`, lower `SCRAPER_MAX_PAGES_PER_SOURCE`, or set `vars.SCRAPER_EXTRACTOR_MODE=deterministic` for scheduled runs.
 
 ### `Unknown source(s): ...` (exit code `2`)
 - Cause: Typo in the `sources` input (e.g., `dost` instead of `dost-sei`).
