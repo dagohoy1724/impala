@@ -2,7 +2,7 @@
 
 Dedicated public GitHub Actions scheduler repository that checks out and runs [`kebbbnnn/scholarship_scraper`](https://github.com/kebbbnnn/scholarship_scraper) daily, paired with two-layer anti-deactivation workflows to prevent GitHub from pausing scheduled actions on public repositories after 60 days of commit inactivity.
 
-See [`kebbbnnn/scholarship_scraper`'s `docs/github-actions.md`](https://github.com/kebbbnnn/scholarship_scraper/blob/main/docs/github-actions.md) for upstream scraper behavior, connectors, and CLI options.
+See [`kebbbnnn/scholarship_scraper`'s `docs/github-actions.md`](https://github.com/kebbbnnn/scholarship_scraper/blob/main/docs/github-actions.md) and [`docs/dynamic-scraping.md`](https://github.com/kebbbnnn/scholarship_scraper/blob/main/docs/dynamic-scraping.md) for upstream scraper behavior, connectors, dynamic LLM scraping, and CLI options.
 
 > [!IMPORTANT]
 > **Avoid duplicate concurrent scrapes:** `kebbbnnn/scholarship_scraper` keeps its own `.github/workflows/scrape.yml` schedule commented out by default. If you ever re-enable that schedule while `impala` persists into the same Turso database, disable one of the two schedules so they do not scrape concurrently into the same database (cross-repo runs do not share a `concurrency` group).
@@ -12,7 +12,7 @@ See [`kebbbnnn/scholarship_scraper`'s `docs/github-actions.md`](https://github.c
 ### 1. Daily Scholarship Collection Workflow ([`.github/workflows/scrape.yml`](.github/workflows/scrape.yml))
 
 - **Schedule:** `7 18 * * *` (`18:07 UTC` = `02:07 AM PHT` daily), pre-shifted ~7 hours before `09:00 AM PHT` to compensate for GitHub Actions' `00:00–02:00 UTC` cron queue lag so the daily collection completes by ~`09:00 AM PHT`.
-- **Concurrency & Timeout:** Uses `concurrency: group: scholarship-collection` with `cancel-in-progress: false` so overlapping scheduled/manual runs queue instead of interrupting an active database write. Timeout: `45 minutes` (sized for dynamic multi-hop Ghost/Gemini scraping across built-in + custom sources).
+- **Concurrency & Timeout:** Uses `concurrency: group: scholarship-collection` with `cancel-in-progress: false` so overlapping scheduled/manual runs queue instead of interrupting an active database write. Timeout: `60 minutes` (sized for dynamic multi-hop Ghost/Gemini scraping across 18+ built-in and custom sources).
 - **Execution Flow:**
   1. **Checks out `kebbbnnn/scholarship_scraper`** directly into the runner workspace (`SCRAPER_REPO` / `SCRAPER_REF`, defaulting to `kebbbnnn/scholarship_scraper@main`). Works unauthenticated for public repos, or authenticates with a one-shot masked `SCRAPER_REPO_TOKEN` (no persisted git credentials) if the scraper repo is private.
   2. **Sets up `uv` and Python 3.12** (`astral-sh/setup-uv@v10.4.0` with lockfile caching).
@@ -37,8 +37,8 @@ See [`kebbbnnn/scholarship_scraper`'s `docs/github-actions.md`](https://github.c
 | `mode` | choice | `live` | `live`, `seed-curated`, `health` | `live` scrapes live URLs; `seed-curated` runs offline fixture snapshots (skips browser install); `health` checks URL reachability & layout landmarks. |
 | `extractor` | choice | `dynamic` | `dynamic`, `deterministic` | `dynamic` runs Ghost (Gemini) multi-hop extraction with automatic deterministic fallback; `deterministic` disables LLM calls and uses HTML/PDF heuristics only. Scheduled runs defer to `vars.SCRAPER_EXTRACTOR_MODE` (default `dynamic`). |
 | `target_url` | string | `""` | Any public `http(s)://` URL | Optional single scholarship website URL to run via `scrape-url` in `live` mode (overrides `sources`). |
-| `sources` | string | `""` (all) | Comma-separated slugs or adapter keys | Limits execution to specific built-in (`ched`, `dost-sei`, `unifast`, `tesda`, `up`, `ateneo`, `dlsu`, `sm-foundation`) or saved `custom_sources.json` connectors. |
-| `max_pages` | string | `""` | Integer `>= 1` | Optional override for maximum pages fetched per source in dynamic mode. Leave blank to respect per-source `custom_sources.json` caps, `vars.SCRAPER_MAX_PAGES_PER_SOURCE`, or the default (`8`). |
+| `sources` | string | `""` (all) | Comma-separated slugs or adapter keys | Limits execution to specific built-in (18 connectors across Government, Universities, Foundations, and International — see [Setup Guide](SETUP_GUIDE.md#valid-sources-values)) or saved `custom_sources.json` connectors. |
+| `max_pages` | string | `""` | Integer `>= 1` | Optional override for maximum pages fetched per source in dynamic mode. Leave blank to respect per-source `custom_sources.json` caps, `vars.SCRAPER_MAX_PAGES_PER_SOURCE`, or the workflow default (`5`). |
 | `max_depth` | string | `""` | Integer `>= 0` | Optional override for maximum hop depth per source in dynamic mode. Leave blank to respect per-source `custom_sources.json` caps, `vars.SCRAPER_MAX_CRAWL_DEPTH`, or the default (`2`). |
 | `force_browser` | boolean | `false` | `true` / `false` | Forces headless browser rendering for HTML pages (`live` mode only). |
 | `no_skip_unchanged` | boolean | `false` | `true` / `false` | Re-extracts documents even if their SHA-256 `content_hash` already exists in `source_documents`. |
@@ -49,8 +49,11 @@ See [`kebbbnnn/scholarship_scraper`'s `docs/github-actions.md`](https://github.c
 Common `gh` CLI triggers:
 
 ```bash
-# Run all built-in + saved custom sources live (dynamic Ghost Gemini extractor)
+# Run all 18 built-in + saved custom sources live (dynamic Ghost Gemini extractor)
 gh workflow run scrape.yml
+
+# Small dynamic smoke test across 2 sources (verify engine_used on GitHub runner IPs)
+gh workflow run scrape.yml -f mode=live -f extractor=dynamic -f sources=ateneo,sm-foundation -f max_pages=3 -f max_depth=1
 
 # Zero-secret smoke test using offline curated snapshots (~20s, skips browser downloads)
 gh workflow run scrape.yml -f mode=seed-curated -f fail_on_error=true
@@ -59,7 +62,7 @@ gh workflow run scrape.yml -f mode=seed-curated -f fail_on_error=true
 gh workflow run scrape.yml -f mode=live -f target_url=https://www.sm-foundation.org/what_we_do/college-scholarship-program/ -f max_pages=4 -f max_depth=1
 
 # Scrape specific sources using deterministic extraction only (no LLM calls)
-gh workflow run scrape.yml -f mode=live -f extractor=deterministic -f sources=ched,dost-sei -f force_browser=true
+gh workflow run scrape.yml -f mode=live -f extractor=deterministic -f sources=ched,dost-sei,ust,megaworld-foundation -f force_browser=true
 
 # Run source health & landmark checks
 gh workflow run scrape.yml -f mode=health -f fail_on_error=true
@@ -117,10 +120,10 @@ Configure these under **Settings -> Secrets and variables -> Actions**.
 | `SCRAPER_RATE_LIMIT_DELAY_SECONDS` | `1.0` | Delay in seconds between requests. |
 | `SCRAPER_BROWSER_SEED` | *(random per run)* | Optional integer seed for deterministic `invisible-playwright` fingerprints. |
 | `SCRAPER_LLM_MODEL` | `gemini` | Ghost model identifier used during dynamic LLM extraction. |
-| `SCRAPER_LLM_DELAY_SECONDS` | `2.0` | Minimum pacing delay in seconds between Ghost LLM calls. |
+| `SCRAPER_LLM_DELAY_SECONDS` | `3.0` | Minimum pacing delay in seconds between Ghost LLM calls (workflow default `3.0` for 18+ sources). |
 | `SCRAPER_LLM_TIMEOUT_SECONDS` | `90` | HTTP timeout in seconds when `GHOST_BASE_URL` is configured. |
 | `SCRAPER_LLM_MAX_CHARS` | `24000` | Maximum condensed page text length sent per Gemini extraction prompt. |
-| `SCRAPER_MAX_PAGES_PER_SOURCE` | `8` | Default maximum pages fetched per source in dynamic multi-hop mode. |
+| `SCRAPER_MAX_PAGES_PER_SOURCE` | `5` | Default maximum pages fetched per source in dynamic multi-hop mode (workflow default `5` for 18+ sources). |
 | `SCRAPER_MAX_CRAWL_DEPTH` | `2` | Default maximum hop depth per source in dynamic multi-hop mode. |
 
 ### 2. Deploy the Cloudflare Worker (Optional External Keep-Alive)

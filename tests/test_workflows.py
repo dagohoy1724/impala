@@ -194,7 +194,13 @@ class WorkflowStructureTests(unittest.TestCase):
         self.assertTrue(all(token in self.scrape_text for token in expected_env_vars))
 
     def test_scrape_workflow_uses_extended_timeout_for_dynamic_scraping(self) -> None:
-        self.assertIn("timeout-minutes: 45", self.scrape_text)
+        self.assertIn("timeout-minutes: 60", self.scrape_text)
+
+    def test_scrape_workflow_defaults_crawl_budget_and_llm_pacing_for_18_plus_sources(self) -> None:
+        self.assertTrue(
+            "SCRAPER_MAX_PAGES_PER_SOURCE: ${{ vars.SCRAPER_MAX_PAGES_PER_SOURCE || '5' }}" in self.scrape_text
+            and "SCRAPER_LLM_DELAY_SECONDS: ${{ vars.SCRAPER_LLM_DELAY_SECONDS || '3.0' }}" in self.scrape_text
+        )
 
     def test_workflows_do_not_interpolate_untrusted_inputs_into_run_scripts(self) -> None:
         unsafe_pattern = re.compile(r"^\s*[^#\n]*\$\{\{\s*inputs\.")

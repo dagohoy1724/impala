@@ -30,12 +30,12 @@ on:
         type: string
         default: ""
       sources:
-        description: "Comma-separated source keys or slugs (e.g., ched,dost-sei,up). Empty runs all built-in + custom sources."
+        description: "Comma-separated source keys or slugs (e.g., ched,dost-sei,ust,megaworld-foundation,fulbright-ph). Empty runs all built-in + custom sources."
         required: false
         type: string
         default: ""
       max_pages:
-        description: "Optional max pages per source in dynamic mode (empty uses custom_sources.json, vars.SCRAPER_MAX_PAGES_PER_SOURCE, or 8)"
+        description: "Optional max pages per source in dynamic mode (empty uses custom_sources.json, vars.SCRAPER_MAX_PAGES_PER_SOURCE, or 5)"
         required: false
         type: string
         default: ""
@@ -85,8 +85,8 @@ jobs:
   scrape:
     name: Collect Philippine Scholarships
     runs-on: ubuntu-latest
-    # Accommodates dynamic multi-hop Ghost (Gemini) crawling across built-in + custom sources
-    timeout-minutes: 45
+    # Accommodates dynamic multi-hop Ghost (Gemini) crawling across 18+ built-in and custom sources
+    timeout-minutes: 60
 
     steps:
       - name: Checkout scholarship_scraper
@@ -265,10 +265,10 @@ jobs:
           SCRAPER_EXTRACTOR_MODE: ${{ vars.SCRAPER_EXTRACTOR_MODE }}
           GHOST_BASE_URL: ${{ secrets.GHOST_BASE_URL || vars.GHOST_BASE_URL }}
           SCRAPER_LLM_MODEL: ${{ vars.SCRAPER_LLM_MODEL || 'gemini' }}
-          SCRAPER_LLM_DELAY_SECONDS: ${{ vars.SCRAPER_LLM_DELAY_SECONDS }}
+          SCRAPER_LLM_DELAY_SECONDS: ${{ vars.SCRAPER_LLM_DELAY_SECONDS || '3.0' }}
           SCRAPER_LLM_TIMEOUT_SECONDS: ${{ vars.SCRAPER_LLM_TIMEOUT_SECONDS }}
           SCRAPER_LLM_MAX_CHARS: ${{ vars.SCRAPER_LLM_MAX_CHARS }}
-          SCRAPER_MAX_PAGES_PER_SOURCE: ${{ vars.SCRAPER_MAX_PAGES_PER_SOURCE }}
+          SCRAPER_MAX_PAGES_PER_SOURCE: ${{ vars.SCRAPER_MAX_PAGES_PER_SOURCE || '5' }}
           SCRAPER_MAX_CRAWL_DEPTH: ${{ vars.SCRAPER_MAX_CRAWL_DEPTH }}
           MALLOC_ARENA_MAX: "2"
           RUN_MODE: ${{ inputs.mode || 'live' }}

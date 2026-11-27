@@ -42,7 +42,7 @@ If `kebbbnnn/scholarship_scraper` stays **public**, no checkout token is needed.
   - Override the upstream repo with repository variable **`SCRAPER_REPO`** (`owner/repo`) if you fork or rename it.
 - **Optional proxy, dynamic LLM & crawl tuning:**
   - Secrets: `SCRAPER_PROXY_SERVER` *(also accepted as Variable)*, `SCRAPER_PROXY_USERNAME`, `SCRAPER_PROXY_PASSWORD`, `GHOST_BASE_URL` *(also accepted as Variable; optional external `ghost-server` URL if GitHub runner IPs hit Gemini rate limits)*
-  - Variables: `SCRAPER_EXTRACTOR_MODE` (default `dynamic`; set `deterministic` to disable LLM calls on scheduled runs), `SCRAPER_LLM_MODEL` (default `gemini`), `SCRAPER_LLM_DELAY_SECONDS` (default `2.0`), `SCRAPER_LLM_TIMEOUT_SECONDS` (default `90`), `SCRAPER_LLM_MAX_CHARS` (default `24000`), `SCRAPER_MAX_PAGES_PER_SOURCE` (default `8`), `SCRAPER_MAX_CRAWL_DEPTH` (default `2`), `SCRAPER_TIMEZONE` (default `Asia/Manila`), `SCRAPER_HTTP_TIMEOUT_SECONDS` (default `25`), `SCRAPER_RATE_LIMIT_DELAY_SECONDS` (default `1.0`), `SCRAPER_BROWSER_SEED`
+  - Variables: `SCRAPER_EXTRACTOR_MODE` (default `dynamic`; set `deterministic` to disable LLM calls on scheduled runs), `SCRAPER_LLM_MODEL` (default `gemini`), `SCRAPER_LLM_DELAY_SECONDS` (workflow default `3.0`), `SCRAPER_LLM_TIMEOUT_SECONDS` (default `90`), `SCRAPER_LLM_MAX_CHARS` (default `24000`), `SCRAPER_MAX_PAGES_PER_SOURCE` (workflow default `5`), `SCRAPER_MAX_CRAWL_DEPTH` (default `2`), `SCRAPER_TIMEZONE` (default `Asia/Manila`), `SCRAPER_HTTP_TIMEOUT_SECONDS` (default `25`), `SCRAPER_RATE_LIMIT_DELAY_SECONDS` (default `1.0`), `SCRAPER_BROWSER_SEED`
 
 ### Step 1.3: Enable Workflow Write Permissions (Required for Keep-Alive)
 
@@ -79,19 +79,22 @@ Verify checkout, `uv` installation, pipeline execution, Job Summary rendering, a
 ### Test 2: Live Scrape or Source Health Check
 
 1. In **Actions -> Scholarship Collection Pipeline -> Run workflow**:
-   - For a quick targeted live test, set **`mode`** to `live` and **`sources`** to `ched,dost-sei`.
+   - For a quick dynamic LLM smoke test, set **`mode`** to `live`, **`extractor`** to `dynamic`, **`sources`** to `ateneo,sm-foundation`, **`max_pages`** to `3`, and **`max_depth`** to `1`, then inspect `Engine` in the Job Summary (`httpx+ghost-gemini` vs `+fallback-deterministic`).
    - For a non-mutating reachability/layout check, set **`mode`** to `health` and **`fail_on_error`** to `true`.
 2. Or run via GitHub CLI (`gh`):
 
 ```bash
-# Live run across all built-in + saved custom sources (dynamic Ghost Gemini extractor)
+# Live run across all 18 built-in + saved custom sources (dynamic Ghost Gemini extractor)
 gh workflow run scrape.yml
+
+# Quick 2-source dynamic smoke test to verify Ghost Gemini reachability on runner IPs
+gh workflow run scrape.yml -f mode=live -f extractor=dynamic -f sources=ateneo,sm-foundation -f max_pages=3 -f max_depth=1
 
 # Ad-hoc single-site dynamic scrape via scrape-url
 gh workflow run scrape.yml -f mode=live -f target_url=https://www.sm-foundation.org/what_we_do/college-scholarship-program/ -f max_pages=4 -f max_depth=1
 
 # Targeted live run using deterministic extraction only with forced headless browser rendering
-gh workflow run scrape.yml -f mode=live -f extractor=deterministic -f sources=ched,dost-sei -f force_browser=true
+gh workflow run scrape.yml -f mode=live -f extractor=deterministic -f sources=ched,dost-sei,ust,megaworld-foundation -f force_browser=true
 
 # Watch an active run and download its exported dataset artifact
 gh run watch
@@ -100,16 +103,26 @@ gh run download --name "scholarships-export-<run_number>-<run_attempt>" --dir ./
 
 #### Valid `sources` Values
 
-| Provider Slug | Adapter Key | Provider |
-| --- | --- | --- |
-| `ched` | `ched_stufaps` | Commission on Higher Education (CHED) |
-| `dost-sei` | `dost_sei` | DOST - Science Education Institute (DOST-SEI) |
-| `unifast` | `unifast_programs` | UniFAST |
-| `tesda` | `tesda_scholarships` | TESDA |
-| `up` | `up_scholarships` | University of the Philippines (UP) |
-| `ateneo` | `ateneo_scholarships` | Ateneo de Manila University |
-| `dlsu` | `dlsu_scholarships` | De La Salle University (DLSU) |
-| `sm-foundation` | `sm_foundation` | SM Foundation |
+| Provider Slug | Adapter Key | Provider | Category |
+| --- | --- | --- | --- |
+| `ched` | `ched_stufaps` | Commission on Higher Education (CHED) | Government |
+| `dost-sei` | `dost_sei` | DOST - Science Education Institute (DOST-SEI) | Government |
+| `unifast` | `unifast_programs` | UniFAST | Government |
+| `tesda` | `tesda_scholarships` | TESDA | Government |
+| `da-ati` | `da_ati_scholarships` | DA - Agricultural Training Institute (DA-ATI) | Government |
+| `qc-scholarship` | `qc_scholarship` | Quezon City Government (QCYDO) | Government |
+| `up` | `up_scholarships` | University of the Philippines (UP) | University |
+| `ateneo` | `ateneo_scholarships` | Ateneo de Manila University | University |
+| `dlsu` | `dlsu_scholarships` | De La Salle University (DLSU) | University |
+| `ust` | `ust_scholarships` | University of Santo Tomas (UST) | University |
+| `mapua` | `mapua_scholarships` | Mapúa University | University |
+| `sm-foundation` | `sm_foundation` | SM Foundation | Foundation |
+| `megaworld-foundation` | `megaworld_foundation` | Megaworld Foundation | Foundation |
+| `gokongwei-foundation` | `gokongwei_foundation` | Gokongwei Brothers Foundation (GBF) | Foundation |
+| `ayala-foundation` | `ayala_foundation` | Ayala Foundation | Foundation |
+| `fulbright-ph` | `fulbright_ph` | Fulbright Philippines (PAEF) | International |
+| `mext-japan` | `mext_japan` | Japanese Government (MEXT) | International |
+| `erasmus-mundus` | `erasmus_mundus` | European Union (Erasmus+) | International |
 
 ### Test 3: Keep Scheduled Actions Alive
 
